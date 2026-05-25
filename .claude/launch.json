@@ -1,5 +1,11 @@
 {
-  "command": "npm run dev",
-  "port": 5173,
-  "autoPort": false
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Market Racer",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"],
+      "port": 5173
+    }
+  ]
 }

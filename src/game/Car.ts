@@ -1,91 +1,177 @@
-// Player car: rendered as a simple graphic, driven by arcade physics.
+// Player car: sleek sports car with glow effects drawn procedurally.
 
 import Phaser from 'phaser';
 
-const CAR_W = 52;
-const CAR_H = 26;
+const CAR_W = 76;
+const CAR_H = 28;
+const TEX_W = CAR_W + 14;
+const TEX_H = CAR_H + 20;
 
 export class Car {
   readonly sprite: Phaser.Physics.Arcade.Image;
+  private boostGfx: Phaser.GameObjects.Graphics;
+  private shieldGfx: Phaser.GameObjects.Graphics;
+
   private isOnGround: boolean = false;
-  private airTime: number = 0;       // frames in the air
-  private flipAngle: number = 0;     // accumulated rotation for game-over detection
+  private flipAngle: number = 0;
 
   constructor(scene: Phaser.Scene, x: number, y: number) {
-    // Draw a tiny cartoon car onto a texture at runtime.
-    const gfx = scene.make.graphics({ x: 0, y: 0 });
-    this.drawCar(gfx);
-    gfx.generateTexture('car', CAR_W, CAR_H + 14);
-    gfx.destroy();
+    const g = scene.make.graphics({ x: 0, y: 0 });
+    this.drawCar(g);
+    g.generateTexture('car', TEX_W, TEX_H);
+    g.destroy();
 
     this.sprite = scene.physics.add.image(x, y, 'car');
     this.sprite.setCollideWorldBounds(false);
     (this.sprite.body as Phaser.Physics.Arcade.Body).setDamping(false);
+
+    this.boostGfx = scene.add.graphics().setDepth(6);
+    this.shieldGfx = scene.add.graphics().setDepth(6);
   }
 
   private drawCar(g: Phaser.GameObjects.Graphics): void {
-    // Body
-    g.fillStyle(0x22aaff);
-    g.fillRoundedRect(2, 10, CAR_W - 4, CAR_H - 4, 6);
+    const ox = 6;  // horizontal offset to leave room for glow
 
-    // Windscreen
-    g.fillStyle(0xaaddff, 0.7);
-    g.fillRect(28, 12, 14, 10);
+    // Ground shadow
+    g.fillStyle(0x001122, 0.4);
+    g.fillEllipse(ox + CAR_W / 2, CAR_H + 14, CAR_W + 10, 10);
 
-    // Roof
-    g.fillStyle(0x1188dd);
-    g.fillRoundedRect(18, 4, 22, 14, 4);
+    // Underbody / diffuser
+    g.fillStyle(0x0a0a0a);
+    g.fillRect(ox + 10, CAR_H - 2, CAR_W - 22, 8);
 
-    // Wheels
-    g.fillStyle(0x222222);
-    g.fillCircle(12, CAR_H + 4, 8);
-    g.fillCircle(38, CAR_H + 4, 8);
+    // --- Main body ---
+    g.fillStyle(0x00bb44);
+    g.fillRoundedRect(ox + 2, 10, CAR_W - 4, CAR_H - 6, 7);
 
-    // Wheel highlight
-    g.fillStyle(0x888888);
-    g.fillCircle(12, CAR_H + 4, 3);
-    g.fillCircle(38, CAR_H + 4, 3);
+    // --- Nose (tapered front) ---
+    g.fillStyle(0x009933);
+    g.fillTriangle(
+      ox + CAR_W - 4, 10,
+      ox + CAR_W + 8, 19,
+      ox + CAR_W - 4, CAR_H - 6,
+    );
 
-    // Headlight
-    g.fillStyle(0xffff88);
-    g.fillRect(CAR_W - 6, 14, 4, 6);
+    // --- Roof & cockpit ---
+    g.fillStyle(0x008822);
+    g.fillRoundedRect(ox + 22, 2, CAR_W - 38, 16, 5);
+
+    // --- Windshield (angled) ---
+    g.fillStyle(0x99ddff, 0.75);
+    g.fillRect(ox + CAR_W - 30, 3, 14, 13);
+
+    // --- Side window ---
+    g.fillStyle(0x66bbdd, 0.6);
+    g.fillRect(ox + 28, 4, 12, 11);
+
+    // --- Side stripe (sponsorship line) ---
+    g.fillStyle(0x00ff88, 0.45);
+    g.fillRect(ox + 4, 20, CAR_W - 10, 3);
+
+    // --- Rear spoiler blade ---
+    g.fillStyle(0x006611);
+    g.fillRect(ox + 0, 5, 12, 2);   // blade
+    g.fillRect(ox + 3, 7, 3, 8);    // mount
+
+    // --- Headlight ---
+    g.fillStyle(0xffffaa);
+    g.fillRect(ox + CAR_W + 2, 12, 5, 8);
+
+    // --- Headlight glow ---
+    g.fillStyle(0xffff44, 0.45);
+    g.fillRect(ox + CAR_W + 4, 11, 3, 10);
+
+    // --- Brake light ---
+    g.fillStyle(0xff2200);
+    g.fillRect(ox + 0, 13, 4, 7);
+    g.fillStyle(0xff6600, 0.5);
+    g.fillRect(ox - 2, 12, 3, 9);
+
+    // --- Exhaust ---
+    g.fillStyle(0x334455);
+    g.fillRect(ox + 4, CAR_H - 4, 6, 4);
+    g.fillRect(ox + 12, CAR_H - 4, 4, 4);
+
+    // --- Wheel arches (cut-out look) ---
+    g.fillStyle(0x0a0a10);
+    g.fillCircle(ox + 16, CAR_H + 6, 11);
+    g.fillCircle(ox + CAR_W - 14, CAR_H + 6, 11);
+
+    // --- Tires ---
+    g.fillStyle(0x1a1a1a);
+    g.fillCircle(ox + 16, CAR_H + 6, 10);
+    g.fillCircle(ox + CAR_W - 14, CAR_H + 6, 10);
+
+    // --- Rim ---
+    g.fillStyle(0x999999);
+    g.fillCircle(ox + 16, CAR_H + 6, 5);
+    g.fillCircle(ox + CAR_W - 14, CAR_H + 6, 5);
+    g.fillStyle(0xbbbbbb);
+    g.fillCircle(ox + 16, CAR_H + 6, 2);
+    g.fillCircle(ox + CAR_W - 14, CAR_H + 6, 2);
   }
 
   update(
     keys: { right: boolean; left: boolean; space: boolean },
     onGround: boolean,
+    turboActive: boolean,
+    shieldActive: boolean,
   ): void {
     const body = this.sprite.body as Phaser.Physics.Arcade.Body;
     this.isOnGround = onGround;
 
     if (onGround) {
-      this.airTime = 0;
-      // Dampen rotation back to 0 when on the ground.
       this.sprite.angle = Phaser.Math.Linear(this.sprite.angle, 0, 0.2);
     } else {
-      this.airTime++;
-      // Gently rotate while airborne to show the car is tumbling.
-      this.sprite.angle += body.velocity.y * 0.004;
+      this.sprite.angle += body.velocity.y * 0.003;
     }
-
     this.flipAngle = Math.abs(this.sprite.angle);
 
+    const maxV  = turboActive ? 980 : 700;
+    const accel = turboActive ? 26  : 18;
+
     if (keys.right) {
-      body.setVelocityX(Math.min(body.velocity.x + 18, 700));
+      body.setVelocityX(Math.min(body.velocity.x + accel, maxV));
     } else if (keys.left) {
       body.setVelocityX(Math.max(body.velocity.x - 25, 30));
     } else {
-      // Mild coast deceleration
-      body.setVelocityX(body.velocity.x * 0.98);
+      body.setVelocityX(body.velocity.x * 0.985);
     }
 
-    // Jump — only when on ground
     if (keys.space && onGround) {
       body.setVelocityY(-520);
     }
+
+    this.drawBoostFX(turboActive);
+    this.drawShieldFX(shieldActive);
   }
 
-  /** Returns true when the car has flipped far enough to trigger game over. */
+  private drawBoostFX(active: boolean): void {
+    const g = this.boostGfx;
+    g.clear();
+    if (!active) return;
+    const cx = this.sprite.x - 34;
+    const cy = this.sprite.y + 2;
+    g.fillStyle(0x00aaff, 0.25);
+    g.fillEllipse(cx, cy, 55, 18);
+    g.fillStyle(0x0055ff, 0.5);
+    g.fillEllipse(cx + 6, cy, 32, 10);
+    g.fillStyle(0xaaeeff, 0.8);
+    g.fillEllipse(cx + 14, cy, 12, 6);
+  }
+
+  private drawShieldFX(active: boolean): void {
+    const g = this.shieldGfx;
+    g.clear();
+    if (!active) return;
+    const cx = this.sprite.x;
+    const cy = this.sprite.y;
+    g.lineStyle(3, 0x00ff88, 0.6);
+    g.strokeEllipse(cx, cy, 110, 55);
+    g.lineStyle(1, 0x00ff88, 0.2);
+    g.strokeEllipse(cx, cy, 120, 62);
+  }
+
   isFlipped(): boolean {
     return this.flipAngle > 100 && !this.isOnGround;
   }

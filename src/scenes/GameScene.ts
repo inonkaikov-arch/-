@@ -1,193 +1,324 @@
 import Phaser from 'phaser';
 import { RoadGenerator, NEWS_EVENTS } from '../game/RoadGenerator';
 import { RoadRenderer } from '../game/RoadRenderer';
+import { CityBackground } from '../game/CityBackground';
 import { Car } from '../game/Car';
-import { HUD } from '../ui/HUD';
+import { HUD, type PowerUpCounts } from '../ui/HUD';
 
-// Total "race distance" before the closing bell.
 const TOTAL_DISTANCE_PX = 60_000;
+const ROAD_LOOKAHEAD    = 2400;
 
-// How far ahead to generate road (in pixels beyond the camera right edge).
-const ROAD_LOOKAHEAD = 2000;
+// ── power-up collectible ──────────────────────────────────────────────────
+type PUType = 'turbo' | 'shield' | 'repair';
+interface PowerUp {
+  type: PUType;
+  worldX: number;
+  gfx: Phaser.GameObjects.Graphics;
+  collected: boolean;
+}
+
+const PU_COLORS: Record<PUType, number> = { turbo: 0x00ccff, shield: 0x00ff44, repair: 0xff6600 };
+const PU_LABELS: Record<PUType, string> = { turbo: 'T', shield: 'S', repair: 'R' };
 
 export class GameScene extends Phaser.Scene {
-  private roadGen!: RoadGenerator;
-  private roadRenderer!: RoadRenderer;
-  private car!: Car;
-  private hud!: HUD;
+  private road!:    RoadGenerator;
+  private roadRend!: RoadRenderer;
+  private city!:    CityBackground;
+  private car!:     Car;
+  private hud!:     HUD;
 
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
   private spaceKey!: Phaser.Input.Keyboard.Key;
+  private qKey!:    Phaser.Input.Keyboard.Key;
+  private wKey!:    Phaser.Input.Keyboard.Key;
+  private eKey!:    Phaser.Input.Keyboard.Key;
 
-  // Physics ground platform that we reposition each frame under the car.
-  private groundSensor!: Phaser.Physics.Arcade.Image;
+  // Thin invisible slab repositioned under car each frame
+  private ground!:  Phaser.Physics.Arcade.Image;
 
-  private score: number = 0;
-  private portfolioDamage: number = 0;
+  // Game state
+  private score:    number = 0;
+  private damage:   number = 0;   // 0-100
+  private boost:    number = 40;  // 0-100 (starts partly full)
   private newsTimer: number = 0;
-  private newsInterval: number = 12000;  // ms between events
-  private pendingFakeRecovery: boolean = false;
+  private newsInterval: number = 12000;
+  private pendingFake:  boolean = false;
+  private isOver:   boolean = false;
 
-  private isGameOver: boolean = false;
+  // Power-ups
+  private powerups: PowerUp[] = [];
+  private puCounts: PowerUpCounts = { turbo: 0, shield: 0, repair: 0 };
+  private puSpawnX: number = 900;
+
+  // Active effects
+  private turboActive:  boolean = false;
+  private shieldActive: boolean = false;
+  private turboTimer:   number  = 0;
 
   create(): void {
-    this.isGameOver = false;
-    this.score = 0;
-    this.portfolioDamage = 0;
-    this.newsTimer = 0;
-    this.pendingFakeRecovery = false;
+    this.isOver       = false;
+    this.score        = 0;
+    this.damage       = 0;
+    this.boost        = 40;
+    this.newsTimer    = 0;
+    this.pendingFake  = false;
+    this.turboActive  = false;
+    this.shieldActive = false;
+    this.turboTimer   = 0;
+    this.puCounts     = { turbo: 0, shield: 0, repair: 0 };
+    this.powerups     = [];
+    this.puSpawnX     = 900;
 
-    this.roadGen = new RoadGenerator();
+    this.road = new RoadGenerator();
+    this.road.extend(4000);
 
-    // Build enough road for the screen before we place the car.
-    this.roadGen.extend(4000);
+    // Background
+    this.city     = new CityBackground(this);
+    this.roadRend = new RoadRenderer(this);
 
-    this.roadRenderer = new RoadRenderer(this);
-
-    // Place car at the start of the road.
-    const startY = this.roadGen.getYAtX(400) - 30;
+    // Car
+    const startY = this.road.getYAtX(400) - 30;
     this.car = new Car(this, 400, startY);
 
-    // Camera follows the car horizontally.
+    // Camera
     this.cameras.main.startFollow(this.car.sprite, false, 0.08, 0);
-    this.cameras.main.setFollowOffset(-200, 0);  // keep car slightly left of centre
+    this.cameras.main.setFollowOffset(-200, 0);
 
-    // Invisible thin ground slab — repositioned each frame to match road surface.
+    // Ground slab (physics)
     const gs = this.physics.add.image(400, startY + 30, '__DEFAULT');
-    gs.setVisible(false);
-    gs.setImmovable(true);
-    gs.setSize(80, 8);
+    gs.setVisible(false).setImmovable(true).setSize(80, 8);
     (gs.body as Phaser.Physics.Arcade.Body).allowGravity = false;
-    this.groundSensor = gs;
+    this.ground = gs;
+    this.physics.add.collider(this.car.sprite, this.ground);
 
-    // Collider between car and ground slab.
-    this.physics.add.collider(this.car.sprite, this.groundSensor);
-
-    this.cursors = this.input.keyboard!.createCursorKeys();
+    // Input
+    this.cursors  = this.input.keyboard!.createCursorKeys();
     this.spaceKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
+    this.qKey     = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.Q);
+    this.wKey     = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.W);
+    this.eKey     = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.E);
 
     this.hud = new HUD(this);
 
-    // World bounds — very wide so the car never hits an invisible wall.
     this.physics.world.setBounds(0, -200, TOTAL_DISTANCE_PX + 2000, 1200);
   }
 
   update(_time: number, delta: number): void {
-    if (this.isGameOver) return;
+    if (this.isOver) return;
 
-    const carX = this.car.sprite.x;
-    const cameraX = this.cameras.main.scrollX;
+    const carX   = this.car.sprite.x;
+    const camX   = this.cameras.main.scrollX;
+    const roadY  = this.road.getYAtX(carX);
 
-    // Extend the road ahead.
-    this.roadGen.extend(cameraX + ROAD_LOOKAHEAD);
+    // Extend road ahead
+    this.road.extend(camX + ROAD_LOOKAHEAD);
+    this.road.normalise();
 
-    // Keep road shape gradual over time.
-    this.roadGen.normalise();
+    // Move ground slab
+    this.ground.setPosition(carX, roadY + 4);
+    (this.ground.body as Phaser.Physics.Arcade.Body).reset(carX, roadY + 4);
 
-    // Reposition the ground slab directly under the car on the road line.
-    const roadY = this.roadGen.getYAtX(carX);
-    this.groundSensor.setPosition(carX, roadY + 4);
-    (this.groundSensor.body as Phaser.Physics.Arcade.Body).reset(carX, roadY + 4);
+    // On-ground check
+    const carBottom = this.car.sprite.y + this.car.sprite.displayHeight / 2;
+    const onGround  = carBottom >= roadY - 8 && carBottom <= roadY + 20;
 
-    // Determine if car is on ground: within 30px above road surface.
-    const carBottom = this.car.sprite.y + (this.car.sprite.displayHeight / 2);
-    const onGround = carBottom >= roadY - 8 && carBottom <= roadY + 20;
+    // Power-up key inputs
+    if (Phaser.Input.Keyboard.JustDown(this.qKey))  this.useTurbo();
+    if (Phaser.Input.Keyboard.JustDown(this.wKey))  this.useShield();
+    if (Phaser.Input.Keyboard.JustDown(this.eKey))  this.useRepair();
 
-    const keys = {
-      right: this.cursors.right!.isDown,
-      left:  this.cursors.left!.isDown,
-      space: Phaser.Input.Keyboard.JustDown(this.spaceKey),
-    };
+    // Turbo timer
+    if (this.turboActive) {
+      this.turboTimer -= delta;
+      if (this.turboTimer <= 0) this.turboActive = false;
+    }
 
-    this.car.update(keys, onGround);
+    // Car update
+    this.car.update(
+      {
+        right: this.cursors.right!.isDown,
+        left:  this.cursors.left!.isDown,
+        space: Phaser.Input.Keyboard.JustDown(this.spaceKey),
+      },
+      onGround,
+      this.turboActive,
+      this.shieldActive,
+    );
 
-    // Score = distance driven.
+    // Score
     this.score = Math.round(carX);
 
-    // Portfolio damage accumulates when falling (chart crashing).
-    const roadDelta = roadY - this.roadGen.getYAtX(carX - 5);
-    if (roadDelta > 1.5) {
-      this.portfolioDamage += Math.round(roadDelta * 80 * (delta / 16));
+    // Damage — accrues when road slopes sharply downward under the car
+    const slopeDelta = roadY - this.road.getYAtX(carX - 5);
+    if (slopeDelta > 2 && !this.shieldActive) {
+      this.damage = Math.min(100, this.damage + slopeDelta * 0.06 * (delta / 16));
     }
 
-    // News event timer.
+    // Boost regenerates passively, drains when turbo is active
+    if (this.turboActive) {
+      this.boost = Math.max(0, this.boost - 0.25 * (delta / 16));
+    } else {
+      this.boost = Math.min(100, this.boost + 0.08 * (delta / 16));
+    }
+
+    // Spawn and collect power-ups
+    this.spawnPowerUps(camX + ROAD_LOOKAHEAD);
+    this.collectPowerUps(carX);
+
+    // News timer
     this.newsTimer += delta;
     if (this.newsTimer >= this.newsInterval) {
-      this.newsTimer = 0;
+      this.newsTimer    = 0;
       this.newsInterval = Phaser.Math.Between(10000, 15000);
-      this.triggerNewsEvent();
+      this.fireNewsEvent();
     }
 
-    // HUD update.
+    // Best score
+    const best = parseInt(localStorage.getItem('marketRacerBest') ?? '0', 10);
     const distKm = Math.max(0, (TOTAL_DISTANCE_PX - carX) / 1000);
     const speedMph = Math.round(this.car.getSpeed() * 0.05);
-    this.hud.update(this.score, speedMph, distKm, this.portfolioDamage);
 
-    // --- Game-over checks ---
+    this.hud.update(
+      this.score, best, speedMph, distKm,
+      this.damage, this.boost, this.puCounts,
+      this.road.getWaypoints(), carX,
+    );
 
-    // 1. Car fell far below the road.
+    // Draw scene
+    this.city.draw(camX);
+    this.roadRend.draw(this.road.getWaypoints(), camX, carX);
+
+    // ── game-over checks ──────────────────────────────────────────────────
     if (this.car.sprite.y > roadY + 400) {
       this.triggerGameOver('Your car fell into a bear market abyss!');
-      return;
-    }
-
-    // 2. Car flipped too much.
-    if (this.car.isFlipped()) {
-      this.triggerGameOver('Your portfolio flipped! Total loss!');
-      return;
-    }
-
-    // 3. Car stopped moving (stalled).
-    if (carX > 600 && this.car.getSpeed() < 5) {
+    } else if (this.car.isFlipped()) {
+      this.triggerGameOver('Portfolio flipped! Total loss!');
+    } else if (carX > 600 && this.car.getSpeed() < 5) {
       this.triggerGameOver('Market stalled. You ran out of momentum!');
-      return;
-    }
-
-    // 4. Reached the closing bell.
-    if (carX >= TOTAL_DISTANCE_PX) {
+    } else if (carX >= TOTAL_DISTANCE_PX) {
       this.triggerGameOver('🔔 Closing bell! You survived the trading day!');
-      return;
     }
-
-    // Draw the road last (so it's on top of the fill area but below HUD).
-    this.roadRenderer.draw(this.roadGen.getWaypoints(), cameraX);
   }
 
-  private triggerNewsEvent(): void {
-    const pick = NEWS_EVENTS[Phaser.Math.Between(0, NEWS_EVENTS.length - 1)];
-    this.roadGen.applyNewsEvent(pick.type);
-    this.hud.showNews(pick.headline);
+  // ── power-up spawning ─────────────────────────────────────────────────────
 
-    if (pick.type === 'fakeRecoveryThenCrash' && !this.pendingFakeRecovery) {
-      this.pendingFakeRecovery = true;
+  private spawnPowerUps(upToX: number): void {
+    const types: PUType[] = ['turbo', 'shield', 'repair'];
+    while (this.puSpawnX < upToX) {
+      this.puSpawnX += Phaser.Math.Between(600, 1200);
+      if (Math.random() < 0.45) {
+        const type = types[Phaser.Math.Between(0, 2)];
+        const wy   = this.road.getYAtX(this.puSpawnX) - 38;
+        const g    = this.add.graphics().setDepth(4);
+        this.drawPUIcon(g, type);
+        g.setPosition(this.puSpawnX, wy);
+        this.powerups.push({ type, worldX: this.puSpawnX, gfx: g, collected: false });
+      }
+    }
+  }
+
+  private drawPUIcon(g: Phaser.GameObjects.Graphics, type: PUType): void {
+    const col = PU_COLORS[type];
+    g.fillStyle(col, 0.18);
+    g.fillCircle(0, 0, 18);
+    g.lineStyle(2, col, 0.9);
+    g.strokeCircle(0, 0, 18);
+    g.fillStyle(col, 0.85);
+    g.fillCircle(0, 0, 9);
+    // Letter drawn via a text object attached as overlay (skipped here; icon color is enough)
+    // Could add via scene.add.text but would need cleanup — kept simple.
+    void PU_LABELS[type]; // suppress unused-var
+  }
+
+  private collectPowerUps(carX: number): void {
+    for (const pu of this.powerups) {
+      if (pu.collected) continue;
+      // Update Y to track road
+      pu.gfx.setY(this.road.getYAtX(pu.worldX) - 38);
+      if (Math.abs(pu.worldX - carX) < 35) {
+        pu.collected = true;
+        pu.gfx.setVisible(false);
+        this.puCounts[pu.type]++;
+        // Flash feedback
+        this.cameras.main.flash(120, 0, 60, 30);
+      }
+    }
+  }
+
+  // ── power-up usage ────────────────────────────────────────────────────────
+
+  private useTurbo(): void {
+    if (this.puCounts.turbo > 0 && !this.turboActive) {
+      this.puCounts.turbo--;
+      this.turboActive = true;
+      this.turboTimer  = 5000;
+      this.boost       = 100;
+    }
+  }
+
+  private useShield(): void {
+    if (this.puCounts.shield > 0) {
+      this.puCounts.shield--;
+      this.shieldActive = true;
+      this.time.delayedCall(6000, () => { this.shieldActive = false; });
+    }
+  }
+
+  private useRepair(): void {
+    if (this.puCounts.repair > 0) {
+      this.puCounts.repair--;
+      this.damage = Math.max(0, this.damage - 40);
+      this.cameras.main.flash(200, 0, 80, 0);
+    }
+  }
+
+  // ── news events ────────────────────────────────────────────────────────────
+
+  private fireNewsEvent(): void {
+    const pick = NEWS_EVENTS[Phaser.Math.Between(0, NEWS_EVENTS.length - 1)];
+    this.road.applyNewsEvent(pick.type);
+    this.hud.showNews(pick.headline, pick.type);
+
+    const positive = pick.type === 'pump' || pick.type === 'fakeRecoveryThenCrash';
+    const labels: Record<typeof pick.type, [string, string]> = {
+      crash:                ['BEAR CRASH',    'SELL EVERYTHING!'],
+      pump:                 ['BULL RUN',       'PUMP AHEAD!'],
+      volatility:           ['HIGH VOLT.',     'BUCKLE UP!'],
+      fakeRecoveryThenCrash:['BULL TRAP',      'PUMP AHEAD!'],
+      flatMarket:           ['DEAD MARKET',    'ZERO VOLUME.'],
+    };
+    const [title, sub] = labels[pick.type];
+    this.hud.showEventImpact(title, sub, positive);
+
+    if (pick.type === 'fakeRecoveryThenCrash' && !this.pendingFake) {
+      this.pendingFake = true;
       this.time.delayedCall(3500, () => {
-        this.roadGen.triggerCrashAfterFakeRecovery();
-        this.pendingFakeRecovery = false;
-        this.hud.showNews('📉 SUCKERS! It was fake — CRASH INCOMING!');
+        this.road.triggerCrashAfterFakeRecovery();
+        this.pendingFake = false;
+        this.hud.showNews('📉 SUCKERS! It was fake — CRASH INCOMING!', 'crash');
+        this.hud.showEventImpact('DEAD CAT', 'CRASH NOW!', false);
       });
     }
   }
 
-  private triggerGameOver(reason: string): void {
-    this.isGameOver = true;
+  // ── game over ──────────────────────────────────────────────────────────────
 
-    // Save best score.
+  private triggerGameOver(reason: string): void {
+    if (this.isOver) return;
+    this.isOver = true;
+
     const prev = parseInt(localStorage.getItem('marketRacerBest') ?? '0', 10);
     const best = Math.max(prev, this.score);
     localStorage.setItem('marketRacerBest', String(best));
 
-    // Brief pause then switch scene.
-    this.time.delayedCall(1200, () => {
-      this.scene.start('GameOverScene');
-      this.scene.get('GameOverScene').registry.set('goData', {
-        score: this.score,
-        best,
-        reason,
-      });
-    });
+    this.cameras.main.flash(700, 180, 0, 0);
+    this.cameras.main.shake(450, 0.022);
 
-    // Flash screen red.
-    this.cameras.main.flash(600, 200, 0, 0);
-    this.cameras.main.shake(400, 0.02);
+    this.time.delayedCall(1300, () => {
+      this.powerups.forEach(p => p.gfx.destroy());
+      this.city.destroy();
+      this.scene.start('GameOverScene');
+      this.scene.get('GameOverScene').registry.set('goData', { score: this.score, best, reason });
+    });
   }
 }

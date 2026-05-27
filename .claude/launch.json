@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Market Racer",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "preview", "--", "--host", "0.0.0.0", "--port", "4173"],
+      "port": 4173
+    }
+  ]
+}
